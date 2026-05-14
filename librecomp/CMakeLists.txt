@@ -48,11 +48,11 @@ target_include_directories(librecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include/librecomp"
 )
 
-target_compile_options(librecomp PRIVATE
-#    -Wall
-#    -Wextra
-    -Wno-unused-parameter
-)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(librecomp PRIVATE
+        -Wno-unused-parameter
+    )
+endif()
 
 if (WIN32)
     add_compile_definitions(NOMINMAX)
