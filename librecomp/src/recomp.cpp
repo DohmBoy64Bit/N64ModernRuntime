@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <cmath>
 #include <unordered_map>
@@ -11,6 +12,41 @@
 #include <optional>
 #include <mutex>
 #include <array>
+#include <cstdarg>
+
+#include "librecomp/boot_log.hpp"
+
+static std::mutex g_boot_log_mutex;
+
+static void boot_log(const char* msg) {
+    recomp_boot_log(msg);
+}
+
+extern "C" void recomp_boot_log(const char* msg) {
+    if (msg == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_boot_log_mutex);
+    fprintf(stderr, "%s\n", msg);
+    fflush(stderr);
+    FILE* f = fopen("aero_boot_direct.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
+extern "C" void recomp_boot_logf(const char* fmt, ...) {
+    if (fmt == nullptr) {
+        return;
+    }
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    recomp_boot_log(buf);
+}
 #include <cinttypes>
 #include <cuchar>
 #include <charconv>
@@ -407,37 +443,23 @@ enum class StatusReg {
 };
 
 extern "C" void cop0_status_write(recomp_context* ctx, gpr value) {
-    uint32_t old_sr = ctx->status_reg;
-    uint32_t new_sr = (uint32_t)value;
-    uint32_t changed = old_sr ^ new_sr;
+    const uint32_t old_sr = ctx->status_reg;
+    const uint32_t new_sr = static_cast<uint32_t>(value);
+    const uint32_t changed = old_sr ^ new_sr;
 
-    // Check if the FR bit changed
-    if (changed & (uint32_t)StatusReg::FR) {
-        // Check if the FR bit was set
-        if (new_sr & (uint32_t)StatusReg::FR) {
-            // FR = 1, odd single floats point to their own registers
+    // FR is the only status bit that affects recompiled float register layout.
+    if (changed & static_cast<uint32_t>(StatusReg::FR)) {
+        if (new_sr & static_cast<uint32_t>(StatusReg::FR)) {
             ctx->f_odd = &ctx->f1.u32l;
             ctx->mips3_float_mode = true;
-        }
-        // Otherwise, it was cleared
-        else {
-            // FR = 0, odd single floats point to the upper half of the previous register
+        } else {
             ctx->f_odd = &ctx->f0.u32h;
             ctx->mips3_float_mode = false;
         }
-
-        // Remove the FR bit from the changed bits as it's been handled
-        changed &= ~(uint32_t)StatusReg::FR;
     }
 
-    // If any other bits were changed, assert false as they're not handled currently
-    if (changed) {
-        printf("Unhandled status register bits changed: 0x%08X\n", changed);
-        assert(false);
-        exit(EXIT_FAILURE);
-    }
-    
-    // Update the status register in the context
+    // Store the full COP0 Status value. AFA early boot (func_8023E3A0 → func_80248010) sets CU1
+    // (0x20000000) and other IE/IM bits we do not emulate; aborting here was a false fatal.
     ctx->status_reg = new_sr;
 }
 
@@ -479,6 +501,7 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
 }
 
 void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+    boot_log("[boot] init() enter");
     // Initialize the overlays
     recomp::overlays::init_overlays();
 
@@ -523,10 +546,22 @@ std::string recomp::current_mod_game_id() {
 }
 
 void recomp::start_game(const std::u8string& game_id) {
+    boot_log("[boot] recomp::start_game enter");
     std::lock_guard<std::mutex> lock(current_game_mutex);
+    const GameStatus cur = game_status.load(std::memory_order_acquire);
+    if (cur == GameStatus::Running) {
+        boot_log("[boot] recomp::start_game ignored (already running)");
+        return;
+    }
+    if (cur == GameStatus::Quit) {
+        boot_log("[boot] recomp::start_game ignored (shutting down)");
+        return;
+    }
     current_game = game_id;
-    game_status.store(GameStatus::Running);
+    game_status.store(GameStatus::Running, std::memory_order_release);
+    boot_log("[boot] recomp::start_game notifying game thread");
     game_status.notify_all();
+    boot_log("[boot] recomp::start_game exit");
 }
 
 bool ultramodern::is_game_started() {
@@ -642,15 +677,20 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
         // TODO refactor this to allow a project to specify what entrypoint function to run for a give game.
         case GameStatus::Running:
             {
+                boot_log("[boot] start_game: load_stored_rom");
                 if (!recomp::load_stored_rom(current_game.value())) {
+                    boot_log("[boot] ERROR: load_stored_rom failed");
                     ultramodern::error_handling::message_box("Error opening stored ROM! Please restart this program.");
                 }
+                boot_log("[boot] load_stored_rom done");
 
                 auto find_it = game_roms.find(current_game.value());
                 const recomp::GameEntry& game_entry = find_it->second;
 
+                boot_log("[boot] init overlays + IPL3 DMA");
                 init(rdram, context, game_entry.entrypoint_address);
                 if (game_entry.on_init_callback) {
+                    boot_log("[boot] on_init_callback");
                     game_entry.on_init_callback(rdram, context);
                 }
 
@@ -685,16 +725,24 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                     }
                 }
 
+                boot_log("[boot] init_heap");
                 recomp::init_heap(rdram, recomp::mod_rdram_start + mod_ram_used);
 
                 save_type = game_entry.save_type;
                 ultramodern::init_saving(rdram);
 
+                boot_log("[boot] entrypoint (recomp_entrypoint)");
                 try {
                     game_entry.entrypoint(rdram, context);
                 } catch (ultramodern::thread_terminated& terminated) {
-
+                    boot_log("[boot] thread_terminated (normal)");
+                } catch (const std::exception& ex) {
+                    boot_log("[boot] EXCEPTION (see message on stderr next)");
+                    fprintf(stderr, "[boot] EXCEPTION: %s\n", ex.what());
+                    fflush(stderr);
+                    throw;
                 }
+                boot_log("[boot] entrypoint returned");
             }
             return true;
 
@@ -802,11 +850,19 @@ void recomp::start(const recomp::Configuration& cfg) {
     recomp::mods::register_hook_exports();
 
     std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
+        boot_log("[boot] game thread: started");
         debug_printf("[Recomp] Starting\n");
 
         ultramodern::set_native_thread_name("Game Start Thread");
 
-        ultramodern::preinit(rdram, window_handle);
+        try {
+            ultramodern::preinit(rdram, window_handle);
+        } catch (const std::exception& ex) {
+            fprintf(stderr, "[Recomp] ultramodern::preinit failed: %s\n", ex.what());
+            ultramodern::error_handling::message_box(ex.what());
+            ultramodern::quit();
+            return;
+        }
 
         recomp_context context{};
 

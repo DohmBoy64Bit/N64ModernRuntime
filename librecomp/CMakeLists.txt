@@ -49,8 +49,12 @@ target_include_directories(librecomp PRIVATE
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(librecomp PRIVATE -Wno-unused-parameter)
+endif()
+
+if(MSVC)
     target_compile_options(librecomp PRIVATE
-        -Wno-unused-parameter
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Zi>
     )
 endif()
 

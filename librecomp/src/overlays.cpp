@@ -11,6 +11,7 @@
 #include "recompiler/context.h"
 #include "overlays.hpp"
 #include "sections.h"
+#include "librecomp/boot_log.hpp"
 
 static recomp::overlays::overlay_section_table_data_t sections_info {};
 static recomp::overlays::overlays_by_index_t overlays_info {};
@@ -364,7 +365,9 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
 extern "C" recomp_func_t * get_function(int32_t addr) {
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
+        recomp_boot_logf("[boot] FATAL: get_function miss at 0x%08X (see stderr)", static_cast<uint32_t>(addr));
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+        fflush(stderr);
         assert(false);
         std::exit(EXIT_FAILURE);
     }
