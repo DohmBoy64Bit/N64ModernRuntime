@@ -481,6 +481,7 @@ extern "C" void do_break(uint32_t vram) {
 
 std::optional<std::u8string> current_game = std::nullopt;
 std::atomic<GameStatus> game_status = GameStatus::None;
+std::atomic<bool> game_preinit_done{false};
 
 void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
     auto find_it = game_roms.find(current_game.value());
@@ -566,6 +567,10 @@ void recomp::start_game(const std::u8string& game_id) {
 
 bool ultramodern::is_game_started() {
     return game_status.load() != GameStatus::None;
+}
+
+bool recomp::is_game_preinit_done() {
+    return game_preinit_done.load(std::memory_order_acquire);
 }
 
 std::atomic_bool exited = false;
@@ -677,14 +682,36 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
         // TODO refactor this to allow a project to specify what entrypoint function to run for a give game.
         case GameStatus::Running:
             {
-                boot_log("[boot] start_game: load_stored_rom");
-                if (!recomp::load_stored_rom(current_game.value())) {
-                    boot_log("[boot] ERROR: load_stored_rom failed");
-                    ultramodern::error_handling::message_box("Error opening stored ROM! Please restart this program.");
-                }
-                boot_log("[boot] load_stored_rom done");
+                std::u8string game_id = recomp::current_game_id();
 
-                auto find_it = game_roms.find(current_game.value());
+                if (recomp::is_rom_loaded()) {
+                    boot_log("[boot] start_game: ROM already loaded (skip load_stored_rom)");
+                } else {
+                    boot_log("[boot] start_game: load_stored_rom");
+                    if (!recomp::load_stored_rom(game_id)) {
+                        boot_log("[boot] ERROR: load_stored_rom failed");
+                        ultramodern::error_handling::message_box(
+                            "Error opening stored ROM! Please restart this program.");
+                        game_status.store(GameStatus::None);
+                        return false;
+                    }
+                    boot_log("[boot] load_stored_rom done");
+                }
+
+                {
+                    static std::once_flag timers_once;
+                    std::call_once(timers_once, [rdram]() {
+                        boot_log("[boot] init_timers (post-ROM)");
+                        ultramodern::init_timers(rdram);
+                    });
+                }
+
+                auto find_it = game_roms.find(game_id);
+                if (find_it == game_roms.end()) {
+                    boot_log("[boot] ERROR: unknown game_id after start_game");
+                    game_status.store(GameStatus::None);
+                    return false;
+                }
                 const recomp::GameEntry& game_entry = find_it->second;
 
                 boot_log("[boot] init overlays + IPL3 DMA");
@@ -857,6 +884,7 @@ void recomp::start(const recomp::Configuration& cfg) {
 
         try {
             ultramodern::preinit(rdram, window_handle);
+            game_preinit_done.store(true, std::memory_order_release);
         } catch (const std::exception& ex) {
             fprintf(stderr, "[Recomp] ultramodern::preinit failed: %s\n", ex.what());
             ultramodern::error_handling::message_box(ex.what());

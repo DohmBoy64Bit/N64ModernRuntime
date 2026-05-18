@@ -44,6 +44,8 @@ namespace recomp {
         size_t num_base_events();
 
         void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
+        // Non-fatal func_map lookup (returns nullptr if not registered at this VRAM).
+        recomp_func_t* try_get_function(int32_t addr);
 
         struct BasePatchedFunction {
             size_t patch_section;

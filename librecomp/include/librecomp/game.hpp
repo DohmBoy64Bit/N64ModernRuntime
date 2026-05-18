@@ -76,6 +76,7 @@ namespace recomp {
     RomValidationError select_rom(const std::filesystem::path& rom_path, std::u8string& game_id);
     bool is_rom_valid(std::u8string& game_id);
     bool is_rom_loaded();
+    bool is_game_preinit_done();
     void set_rom_contents(std::vector<uint8_t>&& new_rom);
     std::span<const uint8_t> get_rom();
     void do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes);

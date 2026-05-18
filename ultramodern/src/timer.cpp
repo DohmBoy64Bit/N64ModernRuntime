@@ -66,12 +66,24 @@ uint64_t time_now() {
     return duration_to_ticks(std::chrono::high_resolution_clock::now() - start_time);
 }
 
+static bool is_plausible_ostimer_ptr(RDRAM_ARG PTR(OSTimer) t_) {
+    if (t_ == 0) {
+        return false;
+    }
+    const uint64_t off = static_cast<uint64_t>(t_) - 0xFFFFFFFF80000000ULL;
+    // Game VRAM band only — reject garbage pointers before TO_PTR in the timer thread.
+    return off >= 0x80200000ULL && off < 0x80800000ULL;
+}
+
 void timer_thread(RDRAM_ARG1) {
     ultramodern::set_native_thread_name("Timer Thread");
     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
 
     // Lambda comparator function to keep the set ordered
     auto timer_sort = [PASS_RDRAM1](PTR(OSTimer) a_, PTR(OSTimer) b_) {
+        if (!is_plausible_ostimer_ptr(PASS_RDRAM a_) || !is_plausible_ostimer_ptr(PASS_RDRAM b_)) {
+            return a_ < b_;
+        }
         OSTimer* a = TO_PTR(OSTimer, a_);
         OSTimer* b = TO_PTR(OSTimer, b_);
 
@@ -112,6 +124,10 @@ void timer_thread(RDRAM_ARG1) {
 
         // Get the timer that's closest to running out
         PTR(OSTimer) cur_timer_ = *active_timers.begin();
+        if (!is_plausible_ostimer_ptr(PASS_RDRAM cur_timer_)) {
+            active_timers.erase(cur_timer_);
+            continue;
+        }
         OSTimer* cur_timer = TO_PTR(OSTimer, cur_timer_);
 
         // Remove the timer from the queue (it may get readded if waiting is interrupted)

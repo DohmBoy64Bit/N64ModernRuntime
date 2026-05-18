@@ -362,16 +362,24 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
-extern "C" recomp_func_t * get_function(int32_t addr) {
+recomp_func_t* recomp::overlays::try_get_function(int32_t addr) {
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end()) {
+        return nullptr;
+    }
+    return func_find->second;
+}
+
+extern "C" recomp_func_t * get_function(int32_t addr) {
+    recomp_func_t* func = recomp::overlays::try_get_function(addr);
+    if (func == nullptr) {
         recomp_boot_logf("[boot] FATAL: get_function miss at 0x%08X (see stderr)", static_cast<uint32_t>(addr));
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
         fflush(stderr);
         assert(false);
         std::exit(EXIT_FAILURE);
     }
-    return func_find->second;
+    return func;
 }
 
 std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {

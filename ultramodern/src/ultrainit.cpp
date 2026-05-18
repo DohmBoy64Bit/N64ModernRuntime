@@ -24,7 +24,8 @@ void ultramodern::set_callbacks(
 void ultramodern::preinit(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
     ultramodern::set_main_thread();
     ultramodern::init_events(PASS_RDRAM window_handle);
-    ultramodern::init_timers(PASS_RDRAM1);
+    // Timers are started from recomp::start after ROM load (see recomp.cpp) so the timer thread
+    // does not touch RDRAM while load_stored_rom / XXH3 runs on the game thread.
     ultramodern::init_audio();
     ultramodern::init_thread_cleanup();
 }
